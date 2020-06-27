@@ -346,6 +346,82 @@ fitQ$summary.random[[1]][ , 1:3]
 fit$mlik
 fitQ$mlik
 
+#' # The AR1 model
+#'
+#' ## Basic AR1 model
+#' 
+#' * The raw AR1 structure matrix is scaled by $1/(1-\rho^2)$ such that the marginal
+#'   variance of the precision matrix is the specified precision.
+
+rho <- 0.8
+
+#' The AR1 precision matrix is given by
+
+R_ar1 <- sparseMatrix(1:5, 1:5, x = 1)
+diag(R_ar1)[2:4] <- 1 + rho^2
+R_ar1[cbind(1:4, 2:5)] <- -rho
+R_ar1[cbind(2:5, 1:4)] <- -rho
+
+#' For a marginal precision of 1.0, scale the raw structure matrix:
+
+Q_ar1 <- R_ar1 * 1 / (1 - rho^2)
+
+#' Show this matches the Q matrix constructed by INLA
+
+hyper_ar1 <- list(prec = list(initial = log(1), fixed = TRUE),
+                  rho = list(initial = log((1 + rho) / (1 - rho)), fixed = TRUE))
+                  
+fit <- inla(y ~ 0 +
+              f(time, model = "ar1", values = 1:5, hyper = hyper_ar1),
+            data = datanull[1, ], family = "poisson",
+            control.inla = list(strategy = "gaussian", int.strategy = "eb"),
+            control.fixed = list(mean.intercept = 0, prec.intercept = 1),
+            control.compute = list(config = TRUE))
+
+fit$misc$configs$config[[1]]$Q[-1, -1]
+
+Q_ar1
+
+#' ## ICAR x AR1 interaction
+
+#' Three time points 
+
+R_ar1 <- sparseMatrix(1:3, 1:3, x = 1)
+diag(R_ar1)[2] <- 1 + rho^2
+R_ar1[cbind(1:2, 2:3)] <- -rho
+R_ar1[cbind(2:3, 1:2)] <- -rho
+
+Q_ar1 <- R_ar1 * 1 / (1 - rho^2)
+
+fit <- inla(y ~ 0 +
+              f(area, model = "besag", graph = adj, hyper = hyper_area,
+                group = time,
+                control.group = list(model = "ar1", hyper = hyper_ar1["rho"])),
+            data = datanull, family = "poisson",
+            control.inla = list(strategy = "gaussian", int.strategy = "eb"),
+            control.fixed = list(mean.intercept = 0, prec.intercept = 1),
+            control.compute = list(config = TRUE))
+
+round(fit$misc$configs$config[[1]]$Q[-(1:3), -(1:3)], 5)
+kronecker(Q_ar1, R_area)
+
+
+#' ## ICAR x AR1 interaction with `scale.model = TRUE`
+
+fit <- inla(y ~ 0 +
+              f(area, model = "besag", graph = adj, hyper = hyper_area,
+                scale.model = TRUE,
+                group = time, 
+                control.group = list(model = "ar1", hyper = hyper_ar1["rho"])),
+            data = datanull, family = "poisson",
+            control.inla = list(strategy = "gaussian", int.strategy = "eb"),
+            control.fixed = list(mean.intercept = 0, prec.intercept = 1),
+            control.compute = list(config = TRUE))
+
+round(fit$misc$configs$config[[1]]$Q[-(1:3), -(1:3)], 5)
+round(kronecker(Q_ar1, R_area_scaled), 5)
+
+
 
 #' # `sessionInfo()`
 
