@@ -1805,7 +1805,7 @@ inlafit7$mlik
 inlafit7C$mlik
 
 
-#' Same constraints (none)
+#' Same constraints
 
 dim(inlafit7$misc$configs$constr$A)
 dim(inlafit7C$misc$configs$constr$A)
@@ -2118,10 +2118,11 @@ inlafit8$mlik
 inlafit8C$mlik
 
 
-#' Same constraints (none)
+#' Same number of constraints. Different order since we switched the main
+#' and group effect order.
 
-all.equal(inlafit8$misc$configs$constr,
-          inlafit8C$misc$configs$constr)
+nrow(inlafit8$misc$configs$constr$A)
+nrow(inlafit8C$misc$configs$constr$A)
 
 
 #' Hyper parameters
@@ -2401,44 +2402,7 @@ inlafit9C <- inla(Observed ~
 grep(".*rank.*", inlafit9C$logfile, value = TRUE)
 
 
-#' The precision parameter estimates match, but the marginal likelihood does not match.
-
 summary(inlafit9C)
-
-#' Marginal likelihood
-
-inlafit9$mlik
-inlafit9C$mlik
-
-
-#' Same constraints (none)
-
-all.equal(inlafit9$misc$configs$constr,
-          inlafit9C$misc$configs$constr)
-
-
-#' Hyper parameters
-
-inlafit9$internal.summary.hyperpar[, 1:2]
-inlafit9C$internal.summary.hyperpar[, 1:2]
-
-
-#' Fixed effects
-
-inlafit9$summary.fixed[ , 1:2]
-inlafit9C$summary.fixed[ , 1:2]
-
-#' Random effects
-
-plot(inlafit9$summary.random[[1]][order(inlafit9$summary.random[[1]]$ID), 2],
-     inlafit9C$summary.random[[1]][,2],
-     main = "Random effect mean")
-abline(a = 0, b = 1, col = "red")
-
-plot(inlafit9$summary.random[[1]][order(inlafit9$summary.random[[1]]$ID), 3],
-     inlafit9C$summary.random[[1]][,3],
-     main = "Random effect standard deviation")
-abline(a = 0, b = 1, col = "red")
 
 #' ### TMB 
 
@@ -2540,6 +2504,8 @@ abline(0, 1, col = "red")
 
 
 #' ### Model 9b: Explicit sum-to-zero constraint
+#'
+#' This one gets slow!
 
 mod <- '
 #include <TMB.hpp>
@@ -2640,4 +2606,5 @@ plot(summary(sdr9, "report")[,2], summary(sdr9b, "report")[,2],
      xlab = "TMB soft constraint", ylab = "TMB hard constraint",
      main = "Random effect standard devation")
 abline(0, 1, col = "red")
+
 
