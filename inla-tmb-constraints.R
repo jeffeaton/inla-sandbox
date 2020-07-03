@@ -427,8 +427,6 @@ Type objective_function<Type>::operator() ()
 
   DATA_SPARSE_MATRIX(Z_space);
   DATA_SPARSE_MATRIX(Q); // Structure matrix for ICAR area model
-  DATA_SCALAR(Qrank);
-
 
   Type val(0);
 
@@ -464,8 +462,8 @@ Q <- diag(rowSums(adj.mat)) - adj.mat
 tmbdata <- list(y = data$Observed,
                 E = data$Expected,
                 Z_space = Matrix::sparse.model.matrix(~0 + IDf, data),
-                Q = Q,
-                Qrank = as.integer(rankMatrix(Q)))
+                Q = Q)
+
 
 tmbpar <- list(beta0 = 0,
                log_prec_space = 0,
@@ -2607,4 +2605,211 @@ plot(summary(sdr9, "report")[,2], summary(sdr9b, "report")[,2],
      main = "Random effect standard devation")
 abline(0, 1, col = "red")
 
+
+#' ## Model 10: ICAR space + RW1 time + ICAR space x RW1 time
+#'
+#' Model fit with full Type IV constraints
+#'
+
+
+R_space <- diag(rowSums(adj.mat)) - adj.mat
+R_space_scaled <- inla.scale.model(R_space, constr = list(A = matrix(1, ncol = ncol(R_space)), e = 0))
+R_space_scaled_adj <- R_space_scaled + Matrix::Diagonal(ncol(R_space_scaled), diagval)
+
+D_time <- diff(diag(length(levels(data$Yearf))), differences = 1)
+R_time <- Matrix::Matrix(t(D_time) %*% D_time)
+R_time_scaled <- inla.scale.model(R_time, constr = list(A = matrix(1, ncol = ncol(R_time)), e = 0))
+R_time_scaled_adj <- R_time_scaled + Matrix::Diagonal(ncol(R_time_scaled), diagval)
+
+R_space_time <- kronecker(R_time_scaled, R_space_scaled)
+
+eig <- eigen(R_space_time)
+eigval <- zapsmall(eig$values)
+eigvec <- eig$vectors
+
+rankdef <- nrow(R_space) + ncol(R_time) - 1
+
+sum(eigval == 0)
+rankdef
+
+Aconstr <- t(eigvec[ , eigval == 0])
+
+inlafit10 <- inla(Observed ~
+                    f(ID, model = "besag", graph = adj.mat, hyper = prec.prior,
+                      diagonal = diagval, scale.model = TRUE) +
+                    f(Year, model = "rw1", hyper = prec.prior,
+                      diagonal = diagval, scale.model = TRUE) +
+                    f(id.area.year, model = "generic0", Cmatrix = R_space_time,
+                      hyper = prec.prior, diagonal = diagval, rankdef = rankdef, 
+                      extraconstr = list(A = Aconstr, e = numeric(nrow(Aconstr)))),
+                  data = data, E = Expected, family = "poisson",
+                  control.inla = list(strategy = "gaussian", int.strategy = "eb"),
+                  control.compute = list(config = TRUE))
+
+grep(".*rank.*", inlafit10$logfile, value = TRUE)
+
+
+#' The precision parameter estimates match, but the marginal likelihood does not match.
+
+summary(inlafit10)
+
+#' Hyper parameters
+
+inlafit10$internal.summary.hyperpar[, 1:2]
+
+
+
+#' ### TMB 
+
+mod <- '
+#include <TMB.hpp>
+
+template<class Type>
+Type objective_function<Type>::operator() ()
+{
+
+  using namespace density;
+
+  DATA_VECTOR(y);
+  DATA_VECTOR(E);
+
+  DATA_SPARSE_MATRIX(Z_space);
+  DATA_SPARSE_MATRIX(Z_time);
+
+  DATA_MATRIX(C_space_time);
+  DATA_SPARSE_MATRIX(Z_space_time);
+  DATA_SPARSE_MATRIX(R_time);
+  DATA_SPARSE_MATRIX(R_space);
+
+  Type val(0);
+
+  PARAMETER(beta0);
+  // beta0 ~ 1
+
+  PARAMETER(log_prec_space);
+  val -= dlgamma(log_prec_space, Type(0.001), Type(1.0 / 0.001), true);
+  Type sigma_space(exp(-0.5 * log_prec_space));
+
+  PARAMETER_VECTOR(u_raw_space);
+  vector<Type> u_space(u_raw_space * sigma_space);
+
+  val += GMRF(R_space)(u_raw_space);
+  val -= dnorm(u_raw_space.sum(), Type(0), Type(0.001) * u_raw_space.size(), true);  // soft sum-to-zero constraint
+
+
+  PARAMETER(log_prec_time);
+  val -= dlgamma(log_prec_time, Type(0.001), Type(1.0 / 0.001), true);
+  Type sigma_time(exp(-0.5 * log_prec_time));
+
+  PARAMETER_VECTOR(u_raw_time);
+  vector<Type> u_time(u_raw_time * sigma_time);
+
+  val += GMRF(R_time)(u_raw_time);
+  val -= dnorm(u_raw_time.sum(), Type(0), Type(0.001) * u_raw_time.size(), true);  // soft sum-to-zero constraint
+
+
+  PARAMETER(log_prec_space_time);
+  val -= dlgamma(log_prec_space_time, Type(0.001), Type(1.0 / 0.001), true);
+  Type sigma_space_time(exp(-0.5 * log_prec_space_time));
+
+  PARAMETER_ARRAY(u_raw_space_time);
+  vector<Type> u_raw_space_time_v(u_raw_space_time);
+  vector<Type> u_space_time(u_raw_space_time * sigma_space_time);
+
+  val += SEPARABLE(GMRF(R_time), GMRF(R_space))(u_raw_space_time);
+  val -= dnorm(C_space_time * u_raw_space_time_v, Type(0), Type(0.001) * u_raw_space_time.cols(), true).sum();  // soft sum-to-zero constraint
+
+  vector<Type> mu(beta0 +
+                  Z_space * u_space +
+                  Z_time * u_time +
+                  Z_space_time * u_space_time +
+                  log(E));
+  val -= dpois(y, exp(mu), true).sum();
+
+  ADREPORT(u_space);
+  ADREPORT(u_time);
+  ADREPORT(u_space_time);
+
+  return val;
+}
+'
+
+dll <- tmb_compile_and_load(mod)
+
+R_space_time_adj <- R_space_time + Matrix::Diagonal(ncol(R_space_time), 1e-6)
+
+tmbdata <- list(y = data$Observed,
+                E = data$Expected,
+                Z_space = Matrix::sparse.model.matrix(~0 + IDf, data),
+                Z_time = Matrix::sparse.model.matrix(~0 + Yearf, data),
+                C_space_time = Aconstr,
+                Z_space_time = Matrix::sparse.model.matrix(~0 + IDf:Yearf, data),
+                R_space = R_space_scaled_adj,
+                R_time = R_time_scaled_adj)
+
+tmbpar <- list(beta0 = 0,
+               log_prec_space = 0,
+               u_raw_space = numeric(nrow(tmbdata$R_space)),
+               log_prec_time = 0,
+               u_raw_time = numeric(nrow(tmbdata$R_time)),
+               log_prec_space_time = 0,
+               u_raw_space_time = array(0, c(nrow(tmbdata$R_space), nrow(tmbdata$R_time))))
+
+obj <- TMB::MakeADFun(data = tmbdata,
+                      parameters = tmbpar,
+                      random = c("beta0", "u_raw_space", "u_raw_time", "u_raw_space_time"),
+                      DLL = dll)
+
+tmbfit <- nlminb(obj$par, obj$fn, obj$gr)
+
+sdr10 <- TMB::sdreport(obj)
+sdr10sum <- summary(sdr10, "all")
+
+
+#' Hyper parameter comparison
+
+summary(sdr10, "fixed")
+
+cbind("mean" = inlafit10$misc$theta.mode,
+      "se" = sqrt(diag(inlafit10$misc$cov.intern)))
+
+#' Fixed effects (Intercept)
+
+summary(sdr10, "random")[1, , drop = FALSE]
+inlafit10$summary.fixed[ , 1:2]
+
+
+#' Random effects mean and standard deviation
+
+par(mfrow = c(1, 2))
+
+plot(inlafit10$summary.random[[1]][,2],
+     sdr10sum[rownames(sdr10sum) == "u_space", 1],
+     xlab = "INLA", ylab = "TMB", main = "Random effect point estimates")
+abline(0, 1, col = "red")
+
+plot(inlafit10$summary.random[[1]][,3],
+     sdr10sum[rownames(sdr10sum) == "u_space", 2],
+     xlab = "INLA", ylab = "TMB", main = "Random effect standard deviation")
+abline(0, 1, col = "red")
+
+plot(inlafit10$summary.random[[2]][,2],
+     sdr10sum[rownames(sdr10sum) == "u_time", 1],
+     xlab = "INLA", ylab = "TMB", main = "Random effect point estimates")
+abline(0, 1, col = "red")
+
+plot(inlafit10$summary.random[[2]][,3],
+     sdr10sum[rownames(sdr10sum) == "u_time", 2],
+     xlab = "INLA", ylab = "TMB", main = "Random effect standard deviation")
+abline(0, 1, col = "red")
+
+plot(inlafit10$summary.random[[3]][,2],
+     sdr10sum[rownames(sdr10sum) == "u_space_time", 1],
+     xlab = "INLA", ylab = "TMB", main = "Random effect point estimates")
+abline(0, 1, col = "red")
+
+plot(inlafit10$summary.random[[3]][,3],
+     sdr10sum[rownames(sdr10sum) == "u_space_time", 2],
+     xlab = "INLA", ylab = "TMB", main = "Random effect standard deviation")
+abline(0, 1, col = "red")
 
