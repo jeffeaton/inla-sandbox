@@ -52,6 +52,7 @@ data$id.area.year <- as.integer(data$area.year)
 
 # Prior of precision
 prec.prior <- list(prec = list(param = c(0.001, 0.001)))
+rho.prior <- list(rho = list(param = c(0, 0.15)))
 diagval <- INLA:::inla.set.f.default()$diagonal
 
 brain.st <- inla(Observed ~ 1 + f(Year, model = "rw1",
@@ -2105,7 +2106,7 @@ inlafit8C <- inla(Observed ~
 grep(".*rank.*", inlafit8C$logfile, value = TRUE)
 
 
-#' The precision parameter estimates match, but the marginal likelihood does not match.
+#' The precision parameter estimates match
 
 summary(inlafit8)
 summary(inlafit8C)
@@ -2649,7 +2650,7 @@ inlafit10 <- inla(Observed ~
 grep(".*rank.*", inlafit10$logfile, value = TRUE)
 
 
-#' The precision parameter estimates match, but the marginal likelihood does not match.
+#' The precision parameter estimates match
 
 summary(inlafit10)
 
@@ -2811,5 +2812,408 @@ abline(0, 1, col = "red")
 plot(inlafit10$summary.random[[3]][,3],
      sdr10sum[rownames(sdr10sum) == "u_space_time", 2],
      xlab = "INLA", ylab = "TMB", main = "Random effect standard deviation")
+abline(0, 1, col = "red")
+
+
+#' ## Model 11: AR1 time
+#'
+#' This has row constraints on the interaction
+#'
+
+inlafit11 <- inla(Observed ~
+                    f(Year, model = "ar1", hyper = c(prec.prior, rho.prior)),
+                  data = data, E = Expected, family = "poisson",
+                  control.inla = list(strategy = "gaussian", int.strategy = "eb"),
+                  control.compute = list(config = TRUE))
+
+grep(".*rank.*", inlafit11$logfile, value = TRUE)
+
+summary(inlafit11)
+
+#' Hyper parameters
+
+inlafit11$internal.summary.hyperpar[, 1:2]
+
+
+
+#' ### TMB 
+
+mod <- '
+#include <TMB.hpp>
+
+template<class Type>
+Type objective_function<Type>::operator() ()
+{
+
+  using namespace density;
+
+  DATA_VECTOR(y);
+  DATA_VECTOR(E);
+
+  DATA_SPARSE_MATRIX(Z_time);
+
+  Type val(0);
+
+  PARAMETER(beta0);
+  // beta0 ~ 1
+
+  PARAMETER(log_prec_time);
+  val -= dlgamma(log_prec_time, Type(0.001), Type(1.0 / 0.001), true);
+  Type sigma_time(exp(-0.5 * log_prec_time));
+
+  PARAMETER(logit_rho_time);
+  val -= dnorm(logit_rho_time, Type(0.0), Type(1.0 / sqrt(0.15)), true);
+  Type rho_time(2 * exp(logit_rho_time)/(1 + exp(logit_rho_time)) - 1);
+
+  PARAMETER_VECTOR(u_raw_time);
+  vector<Type> u_time(u_raw_time * sigma_time);
+
+  val += AR1(rho_time)(u_raw_time);
+
+  vector<Type> mu(beta0 +
+                  Z_time * u_time +
+                  log(E));
+  val -= dpois(y, exp(mu), true).sum();
+
+  ADREPORT(u_time);
+
+  return val;
+}
+'
+
+dll <- tmb_compile_and_load(mod)
+
+tmbdata <- list(y = data$Observed,
+                E = data$Expected,
+                Z_time = Matrix::sparse.model.matrix(~0 + Yearf, data))
+
+tmbpar <- list(beta0 = 0,
+               log_prec_time = 0,
+               logit_rho_time = 0,
+               u_raw_time = numeric(ncol(tmbdata$Z_time)))
+
+obj <- TMB::MakeADFun(data = tmbdata,
+                      parameters = tmbpar,
+                      random = c("beta0", "u_raw_time"),
+                      DLL = dll)
+
+tmbfit <- nlminb(obj$par, obj$fn, obj$gr)
+
+sdr11 <- TMB::sdreport(obj)
+sdr11sum <- summary(sdr11, "all")
+
+
+#' Hyper parameter comparison
+
+summary(sdr11, "fixed")
+
+cbind("mean" = inlafit11$misc$theta.mode,
+      "se" = sqrt(diag(inlafit11$misc$cov.intern)))
+
+#' Fixed effects (Intercept)
+
+summary(sdr11, "random")[1, , drop = FALSE]
+inlafit11$summary.fixed[ , 1:2]
+
+
+#' Random effects mean and standard deviation
+
+par(mfrow = c(1, 2))
+
+plot(inlafit11$summary.random[[1]][,2],
+     sdr11sum[rownames(sdr11sum) == "u_time", 1],
+     xlab = "INLA", ylab = "TMB", main = "Random effect point estimates")
+abline(0, 1, col = "red")
+
+x <- inlafit11$summary.random[[1]][,3]
+y <- sdr11sum[rownames(sdr11sum) == "u_time", 2]
+plot(x, y,
+     xlab = "INLA", ylab = "TMB", main = "Random effect standard deviation",
+     xlim = range(c(x, y)), ylim = range(c(x, y)))
+abline(0, 1, col = "red")
+
+
+#' ## Model 12: IID space x AR1 time
+#'
+
+inlafit12 <- inla(Observed ~
+                    f(ID, model = "iid", hyper = prec.prior,
+                      group = ID.Year, control.group = list(model = "ar1", hyper = rho.prior)),
+                  data = data, E = Expected, family = "poisson",
+                  control.inla = list(strategy = "gaussian", int.strategy = "eb"),
+                  control.compute = list(config = TRUE))
+
+grep(".*rank.*", inlafit12$logfile, value = TRUE)
+
+summary(inlafit12)
+
+#' Hyper parameters
+
+inlafit12$internal.summary.hyperpar[, 1:2]
+
+
+
+#' ### TMB 
+
+mod <- '
+#include <TMB.hpp>
+
+template<class Type>
+Type objective_function<Type>::operator() ()
+{
+
+  using namespace density;
+
+  DATA_VECTOR(y);
+  DATA_VECTOR(E);
+
+  DATA_SPARSE_MATRIX(Z_space_time);
+  DATA_SPARSE_MATRIX(R_space);
+
+  Type val(0);
+
+  PARAMETER(beta0);
+  // beta0 ~ 1
+
+  PARAMETER(log_prec_space_time);
+  val -= dlgamma(log_prec_space_time, Type(0.001), Type(1.0 / 0.001), true);
+  Type sigma_space_time(exp(-0.5 * log_prec_space_time));
+
+  PARAMETER(logit_rho_time);
+  val -= dnorm(logit_rho_time, Type(0.0), Type(1.0 / sqrt(0.15)), true);
+  Type rho_time(2 * exp(logit_rho_time)/(1 + exp(logit_rho_time)) - 1);
+
+  PARAMETER_ARRAY(u_raw_space_time);
+  vector<Type> u_space_time(u_raw_space_time * sigma_space_time);
+
+  val += SEPARABLE(AR1(rho_time), GMRF(R_space))(u_raw_space_time);
+
+  vector<Type> mu(beta0 +
+                  Z_space_time * u_space_time +
+                  log(E));
+  val -= dpois(y, exp(mu), true).sum();
+
+  ADREPORT(u_space_time);
+
+  return val;
+}
+'
+
+dll <- tmb_compile_and_load(mod)
+
+n_space <- length(levels(data$IDf))
+n_time <- length(levels(data$Yearf))
+R_space <- Matrix::sparseMatrix(1:n_space, 1:n_space, x = rep(1L, n_space))
+
+tmbdata <- list(y = data$Observed,
+                E = data$Expected,
+                Z_space_time = Matrix::sparse.model.matrix(~0 + IDf:Yearf, data),
+                R_space = R_space)
+
+tmbpar <- list(beta0 = 0,
+               log_prec_space_time = 0,
+               logit_rho_time = 0,
+               u_raw_space_time = array(0, c(n_space, n_time)))
+
+obj <- TMB::MakeADFun(data = tmbdata,
+                      parameters = tmbpar,
+                      random = c("beta0", "u_raw_space_time"),
+                      DLL = dll)
+
+tmbfit <- nlminb(obj$par, obj$fn, obj$gr)
+
+sdr12 <- TMB::sdreport(obj)
+sdr12sum <- summary(sdr12, "all")
+
+
+#' Hyper parameter comparison
+
+summary(sdr12, "fixed")
+
+cbind("mean" = inlafit12$misc$theta.mode,
+      "se" = sqrt(diag(inlafit12$misc$cov.intern)))
+
+#' Fixed effects (Intercept)
+
+summary(sdr12, "random")[1, , drop = FALSE]
+inlafit12$summary.fixed[ , 1:2]
+
+
+#' Random effects mean and standard deviation
+
+par(mfrow = c(1, 2))
+
+plot(inlafit12$summary.random[[1]][,2],
+     sdr12sum[rownames(sdr12sum) == "u_space_time", 1],
+     xlab = "INLA", ylab = "TMB", main = "Random effect point estimates")
+abline(0, 1, col = "red")
+
+x <- inlafit12$summary.random[[1]][,3]
+y <- sdr12sum[rownames(sdr12sum) == "u_space_time", 2]
+plot(x, y,
+     xlab = "INLA", ylab = "TMB", main = "Random effect standard deviation",
+     xlim = range(c(x, y)), ylim = range(c(x, y)))
+abline(0, 1, col = "red")
+
+
+
+#' ## Model 13: ICAR space x AR1 time
+#'
+#' This has row constraints on the interaction
+#'
+
+inlafit13 <- inla(Observed ~
+                    f(ID, model = "besag", graph = adj.mat,
+                      scale.model = TRUE, hyper = prec.prior,
+                      group = ID.Year, control.group = list(model = "ar1", hyper = rho.prior)),
+                  data = data, E = Expected, family = "poisson",
+                  control.inla = list(strategy = "gaussian", int.strategy = "eb"),
+                  control.compute = list(config = TRUE))
+
+grep(".*rank.*", inlafit13$logfile, value = TRUE)
+
+summary(inlafit13)
+
+#' Hyper parameters
+
+inlafit13$internal.summary.hyperpar[, 1:2]
+
+#' Constraints
+
+nrow(inlafit13$misc$configs$constr$A)
+
+
+#' ### TMB
+#'
+#' The precision matrix for the ICAR x AR1 interacation is expressed as
+#' $Q = Q_{time} \otimes Q_{space}$. `SEPARABLE` calculates the density assuming
+#' both are full rank. To apply the correct density we need to adjust the
+#' log posterior for the rank deficiency of the ICAR precision matrix.
+#'
+#' The log determinant of the Kronecker product is
+#' $\log |Q| = n_{time} \cdot \log |Q_{space}| + n_{space} \cdot \log |Q_{time}|$.
+#'
+#' The log determinant adjusted for rank deficiency is
+#' $\log |Q| = n_{time} \cdot \log |Q_{space}| + (n_{space} - k_{space})  \cdot \log |Q_{time}|$.
+#' where $k_{space}$ is the rank deficiency $Q_{space}$. Thus we need to subtract
+#' $0.5 \cdot k_space \cdot \log |Q_{time}|$ to the log posterior.
+#'
+#' For and AR1(\rho) time componenent, $|Q^{-1}_{time}| = (1-\rho^2) ^ (n_{time} - 1)$.
+
+mod <- '
+#include <TMB.hpp>
+
+template<class Type>
+Type objective_function<Type>::operator() ()
+{
+
+  using namespace density;
+
+  DATA_VECTOR(y);
+  DATA_VECTOR(E);
+
+  DATA_SPARSE_MATRIX(Z_space_time);
+  DATA_SPARSE_MATRIX(R_space);
+  DATA_SCALAR(rankdef_R_space);
+
+  Type val(0);
+
+  PARAMETER(beta0);
+  // beta0 ~ 1
+
+  PARAMETER(log_prec_space_time);
+  val -= dlgamma(log_prec_space_time, Type(0.001), Type(1.0 / 0.001), true);
+  Type sigma_space_time(exp(-0.5 * log_prec_space_time));
+
+  PARAMETER(logit_rho_time);
+  val -= dnorm(logit_rho_time, Type(0.0), Type(1.0 / sqrt(0.15)), true);
+  Type rho_time(2 * exp(logit_rho_time)/(1 + exp(logit_rho_time)) - 1);
+
+  PARAMETER_ARRAY(u_raw_space_time);
+  vector<Type> u_space_time(u_raw_space_time * sigma_space_time);
+
+  val += SEPARABLE(AR1(rho_time), GMRF(R_space))(u_raw_space_time);
+
+  // Adjust normalising constant for rank deficience of R_space
+  Type log_det_Qar1((u_raw_space_time.cols() - 1) * log(1 - rho_time * rho_time));
+  val -= rankdef_R_space * 0.5 * (log_det_Qar1 - log(2 * PI));
+
+  for (int i = 0; i < u_raw_space_time.cols(); i++) {
+     val -= dnorm(u_raw_space_time.col(i).sum(), Type(0), Type(0.001) * u_raw_space_time.rows(), true);
+  }
+
+  vector<Type> mu(beta0 +
+                  Z_space_time * u_space_time +
+                  log(E));
+  val -= dpois(y, exp(mu), true).sum();
+
+  ADREPORT(u_space_time);
+
+  return val;
+}
+'
+
+dll <- tmb_compile_and_load(mod)
+
+n_space <- length(levels(data$IDf))
+n_time <- length(levels(data$Yearf))
+
+R_space <- diag(rowSums(adj.mat)) - adj.mat
+R_space_scaled <- inla.scale.model(R_space, constr = list(A = matrix(1, ncol = ncol(R_space)), e = 0))
+R_space_scaled_adj <- R_space_scaled + Matrix::Diagonal(ncol(R_space_scaled), diagval)
+
+
+tmbdata <- list(y = data$Observed,
+                E = data$Expected,
+                Z_space_time = Matrix::sparse.model.matrix(~0 + IDf:Yearf, data),
+                R_space = R_space_scaled_adj,
+                rankdef_R_space = nrow(R_space_scaled) - as.integer(rankMatrix(R_space_scaled)))
+
+tmbpar <- list(beta0 = 0,
+               log_prec_space_time = 0,
+               logit_rho_time = 2,
+               u_raw_space_time = array(0, c(n_space, n_time)))
+
+obj <- TMB::MakeADFun(data = tmbdata,
+                      parameters = tmbpar,
+                      random = c("beta0", "u_raw_space_time"),
+                      DLL = dll)
+
+tmbfit <- nlminb(obj$par, obj$fn, obj$gr,
+                 control = list(iter.max = 1000,
+                                eval.max = 1000))
+
+
+sdr13 <- TMB::sdreport(obj)
+sdr13sum <- summary(sdr13, "all")
+
+
+#' Hyper parameter comparison
+
+summary(sdr13, "fixed")
+
+cbind("mean" = inlafit13$misc$theta.mode,
+      "se" = sqrt(diag(inlafit13$misc$cov.intern)))
+
+#' Fixed effects (Intercept)
+
+summary(sdr13, "random")[1, , drop = FALSE]
+inlafit13$summary.fixed[ , 1:2]
+
+
+#' Random effects mean and standard deviation
+
+par(mfrow = c(1, 2))
+
+plot(inlafit13$summary.random[[1]][,2],
+     sdr13sum[rownames(sdr13sum) == "u_space_time", 1],
+     xlab = "INLA", ylab = "TMB", main = "Random effect point estimates")
+abline(0, 1, col = "red")
+
+x <- inlafit13$summary.random[[1]][,3]
+y <- sdr13sum[rownames(sdr13sum) == "u_space_time", 2]
+plot(x, y,
+     xlab = "INLA", ylab = "TMB", main = "Random effect standard deviation",
+     xlim = range(c(x, y)), ylim = range(c(x, y)))
 abline(0, 1, col = "red")
 
